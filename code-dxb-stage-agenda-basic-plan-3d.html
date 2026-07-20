@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CODE DXB — Cross Runway Stage @ The Agenda (Basic Plan)</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #04060c; font-family: Arial, sans-serif; }
+  #app { position: relative; width: 100%; height: 100%; }
+  canvas { display: block; touch-action: none; cursor: grab; }
+  .hdr { position: absolute; top: 18px; left: 20px; color: #e8f0ff; pointer-events: none; }
+  .hdr .t1 { font-size: 20px; font-weight: 800; letter-spacing: .05em; }
+  .hdr .t2 { font-size: 12px; color: #5b9dff; font-weight: 700; letter-spacing: .12em; margin-top: 2px; }
+  .hdr .t3 { font-size: 11px; color: #7288ab; margin-top: 6px; line-height: 1.5; }
+  .ctrl { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; max-width: 96vw; }
+  .ctrl button { padding: 7px 14px; border-radius: 20px; border: 1px solid rgba(120,150,200,.35); background: rgba(10,16,30,.7); color: #8fa5c8; font-size: 12px; letter-spacing: .06em; cursor: pointer; backdrop-filter: blur(6px); }
+  .ctrl button.on { border-color: #5b9dff; background: rgba(50,110,255,.25); color: #cfe3ff; }
+  .hint { position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%); color: #4f6488; font-size: 11px; pointer-events: none; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="hdr">
+    <div class="t1">CROSS RUNWAY STAGE</div>
+    <div class="t2">CODE DXB · THE AGENDA — BASIC PLAN LAYOUT</div>
+    <div class="t3">Main floor 69.63m × 29.37m · usable zone 60m (W) × 20m (D) from stage edge<br>
+    Back circle on house stage + VIP lounges · central circle 3m off stage edge</div>
+  </div>
+  <div class="ctrl" id="ctrl">
+    <button data-view="hero" class="on">HERO</button>
+    <button data-view="top">TOP VIEW</button>
+    <button data-view="speaker">SPEAKER</button>
+    <button data-view="vip">VIP LOUNGE</button>
+    <button data-view="entrance">ENTRANCE</button>
+    <button id="rotBtn" class="on">⏸ ROTATE</button>
+  </div>
+  <div class="hint">drag to orbit · scroll / pinch to zoom · orbit outside to see the floor plate</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  const app = document.getElementById("app");
+
+  /* =========================================================
+     Coordinates: stage edge at z = 0, hall floor extends +z.
+     Main floor: 69.63 m wide × 29.37 m deep (from the plan).
+     Usable stage zone: 60 m wide, 20 m deep from stage edge.
+     ========================================================= */
+  const FLOOR_D = 29.37;
+  const CEIL_H = 17;
+
+  /* hall floor polygon from The Agenda Basic Plan (x, z) */
+  const FLOOR_PTS = [
+    [-25.0, 0.0], [-31.5, 4.5], [-34.8, 10.0], [-30.5, 20.5],
+    [-22.0, 26.5], [-12.5, 29.37], [12.5, 29.37], [22.0, 26.5],
+    [30.5, 20.5], [34.8, 10.0], [31.5, 4.5], [25.0, 0.0]
+  ];
+
+  function pointInFloor(x, z) {
+    let inside = false;
+    for (let i = 0, j = FLOOR_PTS.length - 1; i < FLOOR_PTS.length; j = i++) {
+      const xi = FLOOR_PTS[i][0], zi = FLOOR_PTS[i][1];
+      const xj = FLOOR_PTS[j][0], zj = FLOOR_PTS[j][1];
+      if ((zi > z) !== (zj > z) && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+
+  const VIEWS = {
+    hero:     { theta: Math.PI * 0.5,  phi: 1.12, r: 52, tz: 6 },
+    top:      { theta: Math.PI * 0.5,  phi: 0.10, r: 90, tz: 8 },
+    speaker:  { theta: Math.PI * 0.5,  phi: 1.42, r: 22, tz: 8 },
+    vip:      { theta: Math.PI * 1.22, phi: 1.30, r: 26, tz: 4 },
+    entrance: { theta: Math.PI * 0.5,  phi: 1.38, r: 34, tz: 16 },
+  };
+  let autoRotate = true;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  app.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x04060c);
+  scene.fog = new THREE.FogExp2(0x04060c, 0.006);
+  const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 600);
+
+  const orbit = { theta: VIEWS.hero.theta, phi: VIEWS.hero.phi, r: VIEWS.hero.r, target: new THREE.Vector3(0, 2, 6), goal: null };
+  function applyCamera() {
+    camera.position.set(
+      orbit.target.x + orbit.r * Math.sin(orbit.phi) * Math.cos(orbit.theta),
+      orbit.target.y + orbit.r * Math.cos(orbit.phi),
+      orbit.target.z + orbit.r * Math.sin(orbit.phi) * Math.sin(orbit.theta)
+    );
+    camera.lookAt(orbit.target);
+  }
+
+  /* ---------- materials ---------- */
+  const deckMat  = new THREE.MeshStandardMaterial({ color: 0x0a0c12, roughness: 0.35, metalness: 0.55 });
+  const glossMat = new THREE.MeshStandardMaterial({ color: 0x090b10, roughness: 0.15, metalness: 0.75 });
+  const ledMat   = new THREE.MeshBasicMaterial({ color: 0xbfe9ff });
+  const ledGold  = new THREE.MeshBasicMaterial({ color: 0xE8B84B });
+  const trussMat = new THREE.MeshStandardMaterial({ color: 0x1a1e26, roughness: 0.6, metalness: 0.7 });
+  const houseMat = new THREE.MeshStandardMaterial({ color: 0x16181d, roughness: 0.8, metalness: 0.2 });
+
+  /* ---------- carpet floor (polygon from the plan) ---------- */
+  const carpetCanvas = document.createElement("canvas");
+  carpetCanvas.width = carpetCanvas.height = 256;
+  const cgx = carpetCanvas.getContext("2d");
+  cgx.fillStyle = "#111318"; cgx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 4000; i++) {
+    cgx.fillStyle = `rgba(${20+Math.random()*18|0},${22+Math.random()*18|0},${28+Math.random()*20|0},0.5)`;
+    cgx.fillRect(Math.random()*256, Math.random()*256, 1.6, 1.6);
+  }
+  const carpetTex = new THREE.CanvasTexture(carpetCanvas);
+  carpetTex.wrapS = carpetTex.wrapT = THREE.RepeatWrapping;
+  carpetTex.repeat.set(18, 9);
+
+  const floorShape = new THREE.Shape();
+  FLOOR_PTS.forEach(([x, z], i) => { i === 0 ? floorShape.moveTo(x, -z) : floorShape.lineTo(x, -z); });
+  const floorMesh = new THREE.Mesh(
+    new THREE.ShapeGeometry(floorShape),
+    new THREE.MeshStandardMaterial({ map: carpetTex, roughness: 0.95, metalness: 0.02 })
+  );
+  floorMesh.rotation.x = -Math.PI / 2;   // shape y → -z, so plan z maps correctly
+  floorMesh.receiveShadow = true;
+  scene.add(floorMesh);
+
+  /* ---------- ceiling over the same polygon (faces down only) ---------- */
+  const ceilShape = new THREE.Shape();
+  FLOOR_PTS.forEach(([x, z], i) => { i === 0 ? ceilShape.moveTo(x, z) : ceilShape.lineTo(x, z); });
+  const ceil = new THREE.Mesh(
+    new THREE.ShapeGeometry(ceilShape),
+    new THREE.MeshStandardMaterial({ color: 0x0a0b0f, roughness: 0.95, side: THREE.FrontSide })
+  );
+  ceil.rotation.x = Math.PI / 2;
+  ceil.position.y = CEIL_H;
+  scene.add(ceil);
+
+  /* ---------- perimeter walls: acoustic gray panels, inward-facing ---------- */
+  const wallCanvas = document.createElement("canvas");
+  wallCanvas.width = 512; wallCanvas.height = 256;
+  const wg = wallCanvas.getContext("2d");
+  const panelW = 32;
+  for (let x = 0; x < 512; x += panelW) {
+    wg.fillStyle = ["#2b2e33", "#34383e", "#3d4148", "#26292e"][(x/panelW|0) % 4];
+    wg.fillRect(x, 0, panelW - 2, 256);
+    wg.fillStyle = "rgba(0,0,0,0.55)"; wg.fillRect(x + panelW - 2, 0, 2, 256);
+  }
+  wg.fillStyle = "rgba(0,0,0,0.18)";
+  for (let y = 0; y < 256; y += 6) wg.fillRect(0, y, 512, 1);
+
+  const interior = new THREE.Vector2(0, 12);
+  for (let i = 0; i < FLOOR_PTS.length; i++) {
+    const [x1, z1] = FLOOR_PTS[i];
+    const [x2, z2] = FLOOR_PTS[(i + 1) % FLOOR_PTS.length];
+    if (z1 === 0 && z2 === 0) continue;                    // stage edge — stage house sits here
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const mx = (x1 + x2) / 2, mz = (z1 + z2) / 2;
+    let nx = (z2 - z1) / len, nz = -(x2 - x1) / len;       // edge normal
+    if (nx * (interior.x - mx) + nz * (interior.y - mz) < 0) { nx = -nx; nz = -nz; }
+    const tex = new THREE.CanvasTexture(wallCanvas);
+    tex.wrapS = THREE.RepeatWrapping; tex.repeat.set(Math.max(1, Math.round(len / 8)), 1);
+    const wall = new THREE.Mesh(
+      new THREE.PlaneGeometry(len, CEIL_H),
+      new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9, metalness: 0.05, side: THREE.FrontSide })
+    );
+    wall.position.set(mx, CEIL_H / 2, mz);
+    wall.rotation.y = Math.atan2(nx, nz);
+    wall.receiveShadow = true;
+    scene.add(wall);
+
+    /* fire exits on the long angled walls (red, "do not block") */
+    if (len > 9 && z1 > 0.5 && z2 > 0.5) {
+      const exit = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.2, 2.4),
+        new THREE.MeshStandardMaterial({ color: 0xc0392b, roughness: 0.6, side: THREE.FrontSide })
+      );
+      exit.position.set(mx + nx * 0.06, 1.2, mz + nz * 0.06);
+      exit.rotation.y = Math.atan2(nx, nz);
+      scene.add(exit);
+      const exitSign = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.28, 0.06), new THREE.MeshBasicMaterial({ color: 0x39d98a }));
+      exitSign.position.set(mx + nx * 0.1, 2.8, mz + nz * 0.1);
+      exitSign.rotation.y = Math.atan2(nx, nz);
+      scene.add(exitSign);
+    }
+  }
+
+  /* ---------- house stage (built-in, upstage of z=0) ---------- */
+  const STAGE_W = 30, STAGE_DEPTH = 12, STAGE_H = 1.2;
+  const houseDeck = new THREE.Mesh(new THREE.BoxGeometry(STAGE_W, STAGE_H, STAGE_DEPTH), houseMat);
+  houseDeck.position.set(0, STAGE_H / 2, -STAGE_DEPTH / 2);
+  houseDeck.castShadow = houseDeck.receiveShadow = true;
+  scene.add(houseDeck);
+  // stage house back + side walls
+  const backWall = new THREE.Mesh(new THREE.BoxGeometry(STAGE_W, 15, 0.6), houseMat);
+  backWall.position.set(0, 7.5, -STAGE_DEPTH);
+  scene.add(backWall);
+  [-1, 1].forEach((s) => {
+    const side = new THREE.Mesh(new THREE.BoxGeometry(0.6, 15, STAGE_DEPTH), houseMat);
+    side.position.set(s * STAGE_W / 2, 7.5, -STAGE_DEPTH / 2);
+    scene.add(side);
+    // backstage wings (the yellow support zones on the plan)
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(9, 6, 10), new THREE.MeshStandardMaterial({ color: 0x2e2c20, roughness: 0.9 }));
+    wing.position.set(s * (STAGE_W / 2 + 4.8), 3, -6);
+    scene.add(wing);
+  });
+
+  /* ---------- LED screen on the stage house back wall ---------- */
+  const scrCanvas = document.createElement("canvas");
+  scrCanvas.width = 1024; scrCanvas.height = 256;
+  const sg = scrCanvas.getContext("2d");
+  const grad = sg.createLinearGradient(0, 0, 1024, 256);
+  grad.addColorStop(0, "#04122e"); grad.addColorStop(0.5, "#0a2f6e"); grad.addColorStop(1, "#04122e");
+  sg.fillStyle = grad; sg.fillRect(0, 0, 1024, 256);
+  sg.strokeStyle = "rgba(90,160,255,0.35)"; sg.lineWidth = 2;
+  for (let i = 0; i < 22; i++) {
+    sg.beginPath();
+    let x = Math.random() * 1024, y = Math.random() * 256;
+    sg.moveTo(x, y);
+    for (let j = 0; j < 5; j++) { x += (Math.random() - 0.5) * 130; y += (Math.random() - 0.5) * 80; sg.lineTo(x, y); }
+    sg.stroke();
+  }
+  sg.fillStyle = "#eef6ff"; sg.textAlign = "center"; sg.font = "700 54px Arial, sans-serif";
+  sg.fillText("AI.  PEOPLE.  POSSIBILITIES.", 512, 148);
+  const screen = new THREE.Mesh(
+    new THREE.PlaneGeometry(24, 6.5),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(scrCanvas) })
+  );
+  screen.position.set(0, 8.2, -STAGE_DEPTH + 0.35);
+  scene.add(screen);
+
+  /* ---------- entrance structure at the front (tiered, from the plan) ---------- */
+  for (let i = 0; i < 4; i++) {
+    const step = new THREE.Mesh(new THREE.BoxGeometry(16 - i * 1.4, 0.35, 1.4), houseMat);
+    step.position.set(0, 0.18 + i * 0.35, FLOOR_D - 0.7 - i * 1.2);
+    scene.add(step);
+  }
+
+  /* =========================================================
+     THE CROSS — per the sketch:
+     · back circle ON the house stage (Ø8) with runway to floor
+     · central circle Ø10, its edge 3m off the stage edge → center z=8
+     · side runways + end platforms within 60 m width
+     · short front runway + front circle, all within 20 m depth
+     ========================================================= */
+  const CC = { x: 0, z: 8, r: 5.0 };          // central circle Ø10
+  const RUN_H = 0.9, RUN_W = 4.5;
+  const END_R = 2.75;
+  const SIDE_END_X = 27.2;                    // platform edge at 29.95 → within 60 m
+  const FRONT_C = { z: 15.8, r: 2.25 };       // front circle, far edge 18.05 → within 20 m
+  const BACK_C = { z: -5.5, r: 4.0 };         // back circle on the house stage
+
+  const cross = new THREE.Group();
+  scene.add(cross);
+
+  function ledRing(r, x, y, z, mat) {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(r, 0.08, 8, 64), mat || ledMat);
+    ring.rotation.x = Math.PI / 2;
+    ring.position.set(x, y, z);
+    cross.add(ring);
+  }
+
+  // central circle
+  const central = new THREE.Mesh(new THREE.CylinderGeometry(CC.r, CC.r, 1.2, 64), glossMat);
+  central.position.set(CC.x, 0.6, CC.z);
+  central.castShadow = central.receiveShadow = true;
+  cross.add(central);
+  ledRing(CC.r, CC.x, 1.2, CC.z);
+
+  const logoCanvas = document.createElement("canvas");
+  logoCanvas.width = logoCanvas.height = 512;
+  const lg = logoCanvas.getContext("2d");
+  lg.fillStyle = "rgba(255,255,255,0.92)";
+  lg.textAlign = "center";
+  lg.font = "800 92px Arial, sans-serif";
+  lg.fillText("CODE", 256, 240);
+  lg.fillText("DXB", 256, 340);
+  lg.strokeStyle = "rgba(150,200,255,0.5)"; lg.lineWidth = 4;
+  lg.beginPath(); lg.arc(256, 256, 200, 0, Math.PI * 2); lg.stroke();
+  const logo = new THREE.Mesh(
+    new THREE.CircleGeometry(CC.r * 0.82, 48),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(logoCanvas), transparent: true, opacity: 0.9 })
+  );
+  logo.rotation.x = -Math.PI / 2;
+  logo.position.set(CC.x, 1.21, CC.z);
+  cross.add(logo);
+
+  function runway(len, cx, cz, alongX) {
+    const g = new THREE.Group();
+    const box = new THREE.Mesh(new THREE.BoxGeometry(alongX ? len : RUN_W, RUN_H, alongX ? RUN_W : len), deckMat);
+    box.position.y = RUN_H / 2;
+    box.castShadow = box.receiveShadow = true;
+    g.add(box);
+    const strip = new THREE.BoxGeometry(alongX ? len : 0.14, 0.06, alongX ? 0.14 : len);
+    [-1, 1].forEach((s) => {
+      const m = new THREE.Mesh(strip, ledMat);
+      if (alongX) m.position.set(0, RUN_H + 0.02, (s * RUN_W) / 2);
+      else m.position.set((s * RUN_W) / 2, RUN_H + 0.02, 0);
+      g.add(m);
+    });
+    g.position.set(cx, 0, cz);
+    cross.add(g);
+  }
+  function endPlatform(r, cx, cz) {
+    const p = new THREE.Mesh(new THREE.CylinderGeometry(r, r, RUN_H, 48), glossMat);
+    p.position.set(cx, RUN_H / 2, cz);
+    p.castShadow = p.receiveShadow = true;
+    cross.add(p);
+    ledRing(r, cx, RUN_H, cz);
+    const glow = new THREE.PointLight(0x66aaff, 0.55, 14);
+    glow.position.set(cx, 2.5, cz);
+    scene.add(glow);
+  }
+
+  // side runways at the central circle line (z = 8)
+  const sideRunLen = SIDE_END_X - END_R * 0.8 - CC.r;   // from circle edge to platform
+  runway(sideRunLen, +(CC.r + sideRunLen / 2), CC.z, true);
+  runway(sideRunLen, -(CC.r + sideRunLen / 2), CC.z, true);
+  endPlatform(END_R, +SIDE_END_X, CC.z);
+  endPlatform(END_R, -SIDE_END_X, CC.z);
+
+  // front neck + front circle
+  runway(1.6, 0, CC.z + CC.r + 0.8, false);
+  endPlatform(FRONT_C.r, 0, FRONT_C.z);
+
+  // back runway: central circle → across the 3m gap → up onto the house stage
+  runway(3.0, 0, 1.5, false);                                  // the 3 m gap, floor level
+  const ramp = new THREE.Mesh(new THREE.BoxGeometry(RUN_W, 0.32, 2.2), deckMat);   // step-up to stage height
+  ramp.position.set(0, RUN_H + 0.16, 0.4);
+  ramp.rotation.x = -0.14;
+  cross.add(ramp);
+  const stageRun = new THREE.Mesh(new THREE.BoxGeometry(RUN_W, 0.25, 3.2), deckMat);   // on-stage runway to back circle
+  stageRun.position.set(0, STAGE_H + 0.125, -1.0);
+  cross.add(stageRun);
+
+  // back circle ON the house stage
+  const backCircle = new THREE.Mesh(new THREE.CylinderGeometry(BACK_C.r, BACK_C.r, 0.35, 48), glossMat);
+  backCircle.position.set(0, STAGE_H + 0.175, BACK_C.z);
+  backCircle.castShadow = backCircle.receiveShadow = true;
+  cross.add(backCircle);
+  ledRing(BACK_C.r, 0, STAGE_H + 0.35, BACK_C.z);
+
+  /* speaker on the central circle */
+  const speaker = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.7 });
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.3, 1.1, 12), bodyMat);
+  torso.position.y = 0.85;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 12), bodyMat);
+  head.position.y = 1.56;
+  speaker.add(torso, head);
+  speaker.position.set(0, 1.2, CC.z + 1);
+  speaker.traverse((o) => (o.castShadow = true));
+  cross.add(speaker);
+
+  /* ---------- VIP lounges on the house stage, flanking the back circle ---------- */
+  const loungeSeatMat = new THREE.MeshStandardMaterial({ color: 0x2a2118, roughness: 0.85 });
+  function loungeChair(x, z, faceZ) {
+    const g = new THREE.Group();
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.32, 0.85), loungeSeatMat);
+    seat.position.y = 0.35;
+    g.add(seat);
+    const back = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.62, 0.16), loungeSeatMat);
+    back.position.set(0, 0.72, 0.42);
+    back.rotation.x = 0.22;
+    g.add(back);
+    [-0.38, 0.38].forEach((ax) => {
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.26, 0.7), loungeSeatMat);
+      arm.position.set(ax, 0.58, 0);
+      g.add(arm);
+    });
+    g.position.set(x, STAGE_H, z);
+    g.lookAt(new THREE.Vector3(0, STAGE_H, faceZ));
+    scene.add(g);
+  }
+  [-1, 1].forEach((s) => {
+    for (let row = 0; row < 2; row++) {
+      for (let i = 0; i < 4; i++) {
+        loungeChair(s * (7.5 + i * 1.7), -3.6 - row * 2.2, 6);
+      }
+    }
+    // side tables
+    for (let i = 0; i < 3; i++) {
+      const table = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.28, 0.55, 16),
+        new THREE.MeshStandardMaterial({ color: 0x3a3226, roughness: 0.5, metalness: 0.4 }));
+      table.position.set(s * (8.3 + i * 1.7), STAGE_H + 0.28, -4.7);
+      scene.add(table);
+    }
+    // gold VIP edge strip
+    const strip = new THREE.Mesh(new THREE.BoxGeometry(8.5, 0.07, 0.07), ledGold);
+    strip.position.set(s * 10.5, STAGE_H + 0.04, -2.3);
+    scene.add(strip);
+    const warmL = new THREE.PointLight(0xE8B84B, 0.5, 12);
+    warmL.position.set(s * 10.5, STAGE_H + 4, -5);
+    scene.add(warmL);
+  });
+
+  /* ---------- audience on the floor, clipped to the plan + clearances ---------- */
+  const seatGeo = new THREE.BoxGeometry(0.55, 0.75, 0.5);
+  function seatAllowed(x, z) {
+    if (!pointInFloor(x, z)) return false;
+    if (z < 1.6) return false;                                              // stage edge clearance
+    if (Math.hypot(x - CC.x, z - CC.z) < CC.r + 1.6) return false;          // central circle
+    if (Math.abs(z - CC.z) < RUN_W / 2 + 1.3 && Math.abs(x) < SIDE_END_X + END_R + 1.3) return false;  // side arms
+    if (Math.abs(x) < RUN_W / 2 + 1.3 && z < FRONT_C.z + FRONT_C.r + 1.3) return false;                // front/back arm
+    if (Math.hypot(x, z - FRONT_C.z) < FRONT_C.r + 1.5) return false;       // front circle
+    if (Math.abs(x) < 8.5 && z > FLOOR_D - 6) return false;                 // entrance throat
+    return true;
+  }
+  [
+    { a0: 8,  a1: 82,  tint: new THREE.Color(0x7f9fd6) },
+    { a0: 98, a1: 172, tint: new THREE.Color(0xb49fd8) },
+    { a0: 188, a1: 262, tint: new THREE.Color(0x9fc8a8) },
+    { a0: 278, a1: 352, tint: new THREE.Color(0xd6b98f) },
+  ].forEach(({ a0, a1, tint }) => {
+    const positions = [];
+    for (let r = 8.5; r <= 34; r += 1.4) {
+      const arc = ((a1 - a0) * Math.PI) / 180 * r;
+      const n = Math.max(1, Math.floor(arc / 1.05));
+      for (let i = 0; i <= n; i++) {
+        const ang = ((a0 + ((a1 - a0) * i) / n) * Math.PI) / 180;
+        const x = CC.x + r * Math.cos(ang), z = CC.z + r * Math.sin(ang);
+        if (!seatAllowed(x, z)) continue;
+        positions.push([x, 0.38, z]);
+      }
+    }
+    if (!positions.length) return;
+    const inst = new THREE.InstancedMesh(seatGeo, new THREE.MeshStandardMaterial({ roughness: 0.85 }), positions.length);
+    const dummy = new THREE.Object3D();
+    const c = new THREE.Color();
+    positions.forEach((p, i) => {
+      dummy.position.set(p[0], p[1], p[2]);
+      dummy.lookAt(CC.x, p[1], CC.z);
+      dummy.updateMatrix();
+      inst.setMatrixAt(i, dummy.matrix);
+      c.copy(tint).multiplyScalar(0.18 + Math.random() * 0.14);
+      inst.setColorAt(i, c);
+    });
+    inst.instanceMatrix.needsUpdate = true;
+    if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+    scene.add(inst);
+  });
+
+  /* ---------- rigging + lights ---------- */
+  const trussGrid = new THREE.Group();
+  scene.add(trussGrid);
+  for (let z = 2; z <= 26; z += 8) {
+    const t = new THREE.Mesh(new THREE.BoxGeometry(56, 0.5, 0.5), trussMat);
+    t.position.set(0, 14.5, z);
+    trussGrid.add(t);
+  }
+  for (let x = -24; x <= 24; x += 12) {
+    const t = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 24), trussMat);
+    t.position.set(x, 14.2, 14);
+    trussGrid.add(t);
+  }
+  const fixMat = new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.5, metalness: 0.6 });
+  [[-14, 8], [14, 8], [0, 2], [0, 16], [-24, 8], [24, 8], [-7, 8], [7, 8]].forEach(([x, z]) => {
+    const f = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.4, 0.8, 10), fixMat);
+    f.position.set(x, 14, z);
+    trussGrid.add(f);
+  });
+
+  scene.add(new THREE.AmbientLight(0x22304a, 0.75));
+  const key = new THREE.SpotLight(0xdfe9ff, 1.6, 90, Math.PI / 7, 0.45, 1);
+  key.position.set(0, 15.5, 12);
+  key.target = central;
+  key.castShadow = true;
+  key.shadow.mapSize.set(1024, 1024);
+  scene.add(key);
+  const rim = new THREE.DirectionalLight(0x3355ff, 0.45);
+  rim.position.set(-25, 14, -6);
+  scene.add(rim);
+  const warm = new THREE.PointLight(0x4477ff, 0.7, 60);
+  warm.position.set(0, 12, 8);
+  scene.add(warm);
+
+  const beams = [];
+  [[-14, 8], [14, 8], [0, 2], [0, 16], [-7, 8], [7, 8]].forEach(([x, z]) => {
+    const beam = new THREE.Mesh(
+      new THREE.ConeGeometry(2.6, 13, 24, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0x3d7dff, transparent: true, opacity: 0.06, depthWrite: false })
+    );
+    beam.position.set(x, 14.5 - 6.5, z);
+    scene.add(beam);
+    beams.push(beam);
+  });
+
+  /* ---------- interaction ---------- */
+  let dragging = false, lx = 0, ly = 0, pinchDist = 0;
+  const el = renderer.domElement;
+  const down = (x, y) => { dragging = true; lx = x; ly = y; orbit.goal = null; el.style.cursor = "grabbing"; };
+  const move = (x, y) => {
+    if (!dragging) return;
+    orbit.theta -= (x - lx) * 0.005;
+    orbit.phi = Math.max(0.08, Math.min(1.52, orbit.phi - (y - ly) * 0.004));
+    lx = x; ly = y;
+  };
+  const up = () => { dragging = false; el.style.cursor = "grab"; };
+  el.addEventListener("mousedown", (e) => down(e.clientX, e.clientY));
+  window.addEventListener("mousemove", (e) => move(e.clientX, e.clientY));
+  window.addEventListener("mouseup", up);
+  el.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    orbit.r = Math.max(10, Math.min(140, orbit.r + e.deltaY * 0.05));
+    orbit.goal = null;
+  }, { passive: false });
+  el.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 1) down(e.touches[0].clientX, e.touches[0].clientY);
+    else if (e.touches.length === 2)
+      pinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+  });
+  el.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1) move(e.touches[0].clientX, e.touches[0].clientY);
+    else if (e.touches.length === 2) {
+      const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+      orbit.r = Math.max(10, Math.min(140, orbit.r + (pinchDist - d) * 0.15));
+      pinchDist = d;
+      orbit.goal = null;
+    }
+  }, { passive: false });
+  el.addEventListener("touchend", up);
+
+  const viewBtns = Array.from(document.querySelectorAll("[data-view]"));
+  viewBtns.forEach((b) => b.addEventListener("click", () => {
+    viewBtns.forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    const v = VIEWS[b.dataset.view];
+    orbit.goal = { theta: v.theta, phi: v.phi, r: v.r, tz: v.tz };
+  }));
+  const rotBtn = document.getElementById("rotBtn");
+  rotBtn.addEventListener("click", () => {
+    autoRotate = !autoRotate;
+    rotBtn.classList.toggle("on", autoRotate);
+    rotBtn.textContent = autoRotate ? "⏸ ROTATE" : "▶ ROTATE";
+  });
+
+  const clock = new THREE.Clock();
+  function animate() {
+    requestAnimationFrame(animate);
+    const t = clock.getElapsedTime();
+    if (autoRotate && !dragging && !orbit.goal) orbit.theta += 0.0016;
+    if (orbit.goal) {
+      const g = orbit.goal;
+      orbit.theta += (g.theta - orbit.theta) * 0.06;
+      orbit.phi += (g.phi - orbit.phi) * 0.06;
+      orbit.r += (g.r - orbit.r) * 0.06;
+      orbit.target.z += (g.tz - orbit.target.z) * 0.06;
+      if (Math.abs(g.theta - orbit.theta) < 0.005 && Math.abs(g.phi - orbit.phi) < 0.005 && Math.abs(g.r - orbit.r) < 0.2)
+        orbit.goal = null;
+    }
+    ledMat.color.setHSL(0.56, 0.5, 0.82 + Math.sin(t * 2) * 0.08);
+    beams.forEach((b, i) => {
+      b.rotation.z = Math.sin(t * 0.4 + i) * 0.05;
+      b.material.opacity = 0.05 + Math.sin(t * 1.3 + i * 1.7) * 0.02;
+    });
+    applyCamera();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+})();
+</script>
+</body>
+</html>
